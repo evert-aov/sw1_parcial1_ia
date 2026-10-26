@@ -1,0 +1,11 @@
+name: uml-chat-data
+services:
+  mongo:
+    image: mongo:8
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:27017:27017"
+    volumes:
+      - conversation-data:/data/db
+volumes:
+  conversation-data:

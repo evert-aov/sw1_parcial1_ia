@@ -1,0 +1,17 @@
+[project]
+name = "uml-conversation-service"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi[standard]>=0.115,<1",
+  "httpx>=0.28,<1",
+  "pymongo>=4.11,<5",
+  "google-genai>=1.0,<3",
+  "pydantic-settings>=2.7,<3",
+  "edge-tts>=7,<8",
+]
+[dependency-groups]
+dev = ["pytest>=8,<10", "mongomock>=4.3,<5"]
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
