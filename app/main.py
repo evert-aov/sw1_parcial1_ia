@@ -1,4 +1,5 @@
 """API interna autenticada y ciclo de vida del worker recuperable."""
+import base64
 
 import asyncio
 import hmac
@@ -6,18 +7,19 @@ import logging
 from contextlib import asynccontextmanager
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
-from fastapi.responses import StreamingResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, WebSocket
+from fastapi.responses import StreamingResponse, JSONResponse
 
 from app.config import Settings
 from app.conversations import ConversationService
-from app.models import SpeechRequest, Submission
+from app.models import SpeechRequest, Submission, SuggestionAccept, SuggestionRequest
 from app.memory import ConversationMemory, MemoryRepository
 from app.events import ConversationEvents
 from app.speech import SpeechService, SpeechCache, SpeechBusy, SpeechUnavailable
 from app.providers.edge_speech import EdgeSpeechProvider
 from app.providers.models import ModelProviders
 from app.repository import create_repository
+from app.live import LiveService, LiveStart
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,7 @@ def create_app(service=None, settings=None, speech_provider=None) -> FastAPI:
             service.repository.on_changed = events.publish
             application.state.conversations = service
             application.state.speech = create_speech(service.repository)
+            application.state.live = LiveService(service, config)
             try:
                 yield
             finally:
@@ -56,6 +59,7 @@ def create_app(service=None, settings=None, speech_provider=None) -> FastAPI:
         )
 
         application.state.speech = create_speech(repository)
+        application.state.live = LiveService(application.state.conversations, config)
 
         async def worker():
             """Recorre las salas y recupera turnos persistidos; un fallo no detiene otras salas."""
@@ -92,6 +96,27 @@ def create_app(service=None, settings=None, speech_provider=None) -> FastAPI:
             client.close()
 
     application = FastAPI(title="UML Conversation Service", lifespan=lifespan)
+
+    @application.websocket('/internal/conversations/{room_id}/live')
+    async def live(socket: WebSocket, room_id: UUID):
+        """Acepta solo el puente NestJS; la clave Google jamás llega al navegador."""
+        if not hmac.compare_digest(socket.headers.get('x-ai-service-token', ''), token):
+            await socket.close(code=1008)
+            return
+        await socket.accept()
+        try:
+            payload = await asyncio.wait_for(socket.receive_text(), 10)
+            if len(payload) > 350000:
+                raise ValueError('Live setup exceeds limit')
+            start = LiveStart.model_validate_json(payload)
+            await application.state.live.run(socket, str(room_id), start)
+        except Exception:
+            logger.warning('Live session closed before completion')
+        finally:
+            try:
+                await socket.close()
+            except Exception:
+                pass
 
     def authorize(x_ai_service_token: str = Header(default="")):
         """Valida el secreto del gateway sin exponer las rutas internas a navegadores anónimos."""
@@ -201,6 +226,23 @@ def create_app(service=None, settings=None, speech_provider=None) -> FastAPI:
             "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
         })
 
+    @application.post(
+        "/internal/conversations/{room_id}/messages/{message_id}/speech-playback",
+        dependencies=[Depends(authorize)],
+    )
+    async def speech_playback(room_id: UUID, message_id: UUID, request: SpeechRequest):
+        """Entrega voz fija y frases alineadas al reloj del audio; conserva el texto del chat."""
+        try:
+            asset = await application.state.speech.playback(str(room_id), str(message_id), request.voice)
+        except SpeechBusy:
+            raise HTTPException(429, "Speech capacity is busy", headers={"Retry-After": "5"}) from None
+        except SpeechUnavailable:
+            raise HTTPException(503, "Speech is temporarily unavailable") from None
+        return JSONResponse({
+            "audioBase64": base64.b64encode(asset.audio).decode('ascii'),
+            "mimeType": "audio/mpeg", "cues": asset.cues,
+        }, headers={"Cache-Control": "no-store"})
+
     @application.get(
         "/internal/conversations/{room_id}/proposals/{proposal_id}",
         dependencies=[Depends(authorize)],
@@ -216,5 +258,22 @@ def create_app(service=None, settings=None, speech_provider=None) -> FastAPI:
     def applied(room_id: UUID, proposal_id: UUID, service=Depends(conversations)):
         """Registra la confirmación de una aplicación completada por el backend."""
         return service.proposal(str(room_id), str(proposal_id), applied=True)
+
+    @application.post(
+        "/internal/conversations/{room_id}/suggestions",
+        dependencies=[Depends(authorize)],
+    )
+    def suggestions(room_id: UUID, request: SuggestionRequest, service=Depends(conversations)):
+        """Evalúa el snapshot autorizado y devuelve un consejo breve sin mutar la sala."""
+        return service.suggest(request)
+
+    @application.post(
+        "/internal/conversations/{room_id}/suggestions/accept",
+        status_code=200,
+        dependencies=[Depends(authorize)],
+    )
+    def accept_suggestion(room_id: UUID, accept: SuggestionAccept, service=Depends(conversations)):
+        """Siembra una sugerencia aceptada en la sala personal del usuario para continuar charlando."""
+        return service.accept_suggestion(str(room_id), accept)
 
     return application

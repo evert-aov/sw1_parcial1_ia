@@ -44,8 +44,8 @@ usa el modo Express sin forzar región. Las claves de Gemini API siguen usando s
 ADC continúa disponible cuando no se configura API key.
 
 La configuración local selecciona **Vertex** como proveedor inicial con `gemini-2.5-flash`;
-Qwen sigue disponible en el selector. Activar **Consultar a la IA** en el panel para solicitar
-una respuesta; los mensajes normales entre participantes no invocan al modelo.
+Qwen sigue disponible para texto. En Personal Kanon responde siempre; en Grupal se invoca
+con `@Kanon` escrito o «Kanon» en un clip de voz. Los adjuntos se procesan con Gemini.
 
 | Variable | Valor por defecto / propósito |
 | --- | --- |
@@ -164,7 +164,7 @@ Las reglas para agentes están en [AGENTS.md](AGENTS.md).
 
 ## Modo voz del chat
 
-Respuestas habladas opcionales con Sofía y Marcelo (Bolivia), manteniendo un solo historial.
+Respuestas de chat con la voz masculina fija Marcelo (Bolivia), manteniendo un solo historial.
 Consultar [arquitectura, uso y verificación](docs/voice-mode/README.md).
 
 ## Memoria de conversación
@@ -184,3 +184,19 @@ Ver [funcionamiento, límites y reporte de verificación](docs/conversation-memo
 El chat usa avisos Socket.IO autorizados, alimentados por un flujo SSE interno desde FastAPI.
 El panel recupera historial ante cambios y mantiene una comprobación de respaldo de 30 segundos
 mientras la pestaña está visible. Consultar [contratos, operación y verificación](docs/chat-notifications/README.md).
+
+## Gemini Live y medios originales
+
+La llamada grupal puede conectar con **Gemini Live**, con consentimiento individual y la misma
+clave Google que ya usa FastAPI. Reiniciar IA/backend/frontend tras actualizar; NestJS necesita
+la dependencia `ws` del manifiesto. El navegador requiere micrófono y HTTPS o localhost.
+
+- Modelo Live: `GEMINI_LIVE_MODEL=gemini-3.8-live` (respaldo: `gemini-live-2.5-flash-native-audio`).
+- Duración máxima por sesión: `GEMINI_LIVE_SESSION_SECONDS=600` (30–900).
+- Sesiones simultáneas por proceso: `GEMINI_LIVE_MAX_SESSIONS=4` (1–16).
+- Voz nativa fija: Puck. Edge TTS conserva Marcelo para el chat.
+- Imagen y audio usan Gemini; `@Kanon + clip` resuelve transcripción y respuesta en una solicitud de contenido.
+
+Los valores nuevos tienen predeterminados; no hace falta duplicar la API key ni modificar
+credenciales en NestJS. El modelo debe estar disponible para el proyecto/región configurados.
+Consultar [reporte, diagramas y límites conocidos](docs/gemini-live/README.md).

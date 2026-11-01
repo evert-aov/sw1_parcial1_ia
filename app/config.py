@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     ollama_base_url: str = 'http://127.0.0.1:11434'
     chat_ollama_model: str = 'qwen2.5-coder:14b'
     gemini_model: str = 'gemini-2.5-flash'
+    gemini_live_model: str = 'gemini-3.8-live'
+    gemini_live_voice: str = 'Charon'
+    gemini_live_session_seconds: int = Field(default=600, ge=30, le=900)
+    gemini_live_max_sessions: int = Field(default=4, ge=1, le=16)
     gemini_api_key: str = ''
     gcp_project_id: str = ''
     gcp_location: str = 'us-central1'

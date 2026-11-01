@@ -9,8 +9,9 @@ from app.config import Settings
 from app.conversations import ConversationService
 from app.context import build_context
 from app.main import create_app
-from app.models import Submission, ModelReply, Attachment
+from app.models import Submission, ModelReply, MultimodalReply, Attachment, SuggestionRequest, SuggestionAccept
 from app.repository import ConversationRepository
+from app.speech import SpeechService, SpeechCache
 
 ROOM = str(uuid4())
 USER = str(uuid4())
@@ -28,7 +29,12 @@ class Providers:
         self.contexts = json.loads(context)
         return ModelReply(content='Hello', proposedAst={'nodes': [], 'connections': []}), {'model': 'test', 'provider': provider}
 
-    def describe_attachment(self, attachment):
+    def generate_multimodal(self, context, attachment):
+        """Resuelve medios sin transcripción previa y reutiliza el doble de respuesta estructurada."""
+        reply, metadata = self.generate('vertex', context)
+        return MultimodalReply(description='Recorded question', reply=reply), metadata
+
+    def describe_attachment(self, attachment, *, diagram=None, language=None):
         """Simula una transcripción sin pedir acceso a audio real."""
         return 'Recorded question'
 
@@ -162,3 +168,142 @@ def test_history_pagination_and_sanitization(service):
     assert not earlier['hasMore']
     assert [m['sequence'] for m in earlier['messages'] + recent['messages']] == [1, 2, 3, 4]
     assert 'leaseToken' not in earlier['messages'][0]
+
+
+def test_group_mention_enforcement_and_personal_scope(service):
+    """En chat grupal exige @Kanon o wake-word en audio/llamada; en personal Kanon responde siempre."""
+    service.submit(ROOM, submission(content='Hola equipo, revisen la tabla', scope='group', enforceMention=True))
+    service.process(ROOM)
+    assert len(service.history(ROOM)['messages']) == 1
+    assert service.history(ROOM)['messages'][0]['status'] == 'completed'
+
+    service.submit(ROOM, submission(content='@Kanon agrega atributo email', scope='group', enforceMention=True))
+    service.process(ROOM)
+    group_messages = service.history(ROOM)['messages']
+    assert len(group_messages) == 3
+    assert group_messages[2]['sender']['displayName'] == 'Kanon'
+    assert group_messages[2]['replyToUser'] == {'userId': USER, 'displayName': 'Alice'}
+
+    personal_room = str(uuid4())
+    service.submit(personal_room, submission(content='Necesito ayuda con mi clase', scope='personal', askAssistant=False, enforceMention=True))
+    service.process(personal_room)
+    personal_messages = service.history(personal_room)['messages']
+    assert len(personal_messages) == 2
+    assert personal_messages[1]['sender']['displayName'] == 'Kanon'
+
+
+def test_call_and_voice_wake_word_detection(service):
+    """Las frases de llamada sin Kanon quedan registradas como contexto sin respuesta; al nombrar Kanon responde."""
+    call_room = str(uuid4())
+    service.submit(call_room, submission(content='Creo que falta la clave foranea', scope='group', channel='call', enforceMention=True))
+    service.process(call_room)
+    assert len(service.history(call_room)['messages']) == 1
+    assert service.history(call_room)['messages'][0]['channel'] == 'call'
+
+    service.submit(call_room, submission(content='Kanon tu que opinas de agregar nit a Factura', scope='group', channel='call', enforceMention=True))
+    service.process(call_room)
+    call_messages = service.history(call_room)['messages']
+    assert len(call_messages) == 3
+    assert call_messages[2]['replyToChannel'] == 'call'
+
+    # Nota de voz en chat grupal cuya transcripción menciona Kanon
+    service.providers.describe_attachment = lambda _, **kwargs: 'Hola Kanon revisa la relacion de Pedido'
+    service.submit(call_room, submission(content='', scope='group', enforceMention=True,
+                                         attachment={'kind': 'audio', 'mimeType': 'audio/webm', 'data': 'YWJj'}))
+    service.process(call_room)
+    assert len(service.history(call_room)['messages']) == 5
+    assert service.history(call_room)['messages'][4]['replyToSource'] == 'audio'
+
+
+def test_speech_emphasizes_recipient_and_suggestions_ignore_notes(service):
+    """La locución antepone el destinatario si falta y las sugerencias ignoran notas flotantes."""
+    service.submit(ROOM, submission(content='@Kanon revisa esto', scope='group', enforceMention=True))
+    service.process(ROOM)
+    answer = service.history(ROOM)['messages'][-1]
+
+    class DummySpeechProvider:
+        async def synthesize(self, text, voice):
+            return text.encode()
+
+    speech = SpeechService(service.repository, DummySpeechProvider(), SpeechCache(service.repository.requests.database, 1), service.settings)
+    assert speech.spoken_text(ROOM, answer['id']).startswith('Alice, ')
+
+    # Diagrama solo con notas flotantes no dispara sugerencia
+    empty_notes = SuggestionRequest.model_validate({
+        'sender': {'userId': USER, 'displayName': 'Alice', 'role': 'EDITOR'},
+        'diagram': {'type': 'class', 'nodes': [{'id': 'note_1', 'name': 'Recordatorio', 'nodeType': 'note'}], 'connections': []},
+        'findings': [],
+    })
+    assert service.suggest(empty_notes)['shouldSuggest'] is False
+
+    # Respaldo con hallazgo estructural y siembra idempotente en chat personal
+    with_finding = SuggestionRequest.model_validate({
+        'sender': {'userId': USER, 'displayName': 'Alice', 'role': 'EDITOR'},
+        'diagram': {'type': 'class', 'nodes': [{'id': 'c1', 'name': 'Pedido', 'nodeType': 'class'}], 'connections': []},
+        'findings': [{'code': 'missing_pk', 'message': 'La clase Pedido no tiene clave primaria.'}],
+    })
+    tip = service.suggest(with_finding)
+    assert tip['shouldSuggest'] is True
+    assert 'Pedido' in tip['summary']
+
+    app = create_app(service, service.settings)
+    personal_room = str(uuid4())
+    accept = SuggestionAccept(
+        clientSuggestionId='suggestion-001',
+        sender={'userId': USER, 'displayName': 'Alice', 'role': 'EDITOR'},
+        title=tip['title'],
+        summary=tip['summary'],
+        language='es',
+    )
+    with TestClient(app) as client:
+        headers = {'x-ai-service-token': 'test-token'}
+        first = client.post(f'/internal/conversations/{personal_room}/suggestions/accept', json=accept.model_dump(), headers=headers)
+        second = client.post(f'/internal/conversations/{personal_room}/suggestions/accept', json=accept.model_dump(), headers=headers)
+        assert first.status_code == 200
+        assert first.json()['id'] == second.json()['id']
+        assert len(service.history(personal_room)['messages']) == 1
+
+
+def test_audio_transcription_receives_snapshot_and_canon_still_invokes_kanon(service):
+    """Propaga vocabulario al transcriptor y conserva la frase obtenida sin correcciones forzadas."""
+    captured = {}
+
+    def transcribe(attachment, *, diagram=None, language=None):
+        """Registra el contexto de la solicitud y simula la variante fonética del nombre."""
+        captured.update(diagram=diagram, language=language)
+        return 'Canon, explícame la relación entre pedido y detalle pedido.'
+
+    service.providers.describe_attachment = transcribe
+    diagram = {'nodes': [{'name': 'Pedido'}, {'name': 'DetallePedido'}], 'connections': []}
+    service.submit(ROOM, submission(content='', scope='group', enforceMention=True, language='es',
+                                   diagram=diagram,
+                                   attachment={'kind': 'audio', 'mimeType': 'audio/webm', 'data': 'YWJj'}))
+    service.process(ROOM)
+    messages = service.history(ROOM)['messages']
+    assert captured == {'diagram': diagram, 'language': 'es'}
+    assert len(messages) == 2
+    assert messages[0]['transcription'] == 'Canon, explícame la relación entre pedido y detalle pedido.'
+    assert messages[1]['source'] == 'assistant'
+
+
+@pytest.mark.parametrize('kind,scope,content', [('audio', 'group', '@Kanon'), ('audio', 'personal', ''), ('image', 'group', '@Kanon explica')])
+def test_explicit_multimodal_turn_uses_gemini_once_without_description_pass(service, kind, scope, content):
+    """La invocación conocida envía el adjunto original a Gemini aunque el selector sea Qwen."""
+    from unittest.mock import Mock
+    service.providers.describe_attachment = Mock(side_effect=AssertionError('Unexpected transcription call'))
+    generate = Mock(wraps=service.providers.generate_multimodal)
+    service.providers.generate_multimodal = generate
+    request = submission(content=content, scope=scope, enforceMention=True, provider='ollama',
+                         attachment={'kind': kind, 'mimeType': 'audio/webm' if kind == 'audio' else 'image/png', 'data': 'YWJj'})
+    original = service.submit(ROOM, request)
+    assert original['provider'] == 'vertex'
+    service.process(ROOM)
+    messages = service.history(ROOM)['messages']
+    assert len(messages) == 2
+    assert messages[0]['transcription'] == 'Recorded question'
+    assert messages[1]['provider'] == 'vertex'
+    service.providers.describe_attachment.assert_not_called()
+    generate.assert_called_once()
+    assert generate.call_args.args[1].data == 'YWJj'
+    assert service.repository.request(original['id'])['provider'] == 'ollama'
+    assert service.submit(ROOM, request)['id'] == original['id']

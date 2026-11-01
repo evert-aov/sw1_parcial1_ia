@@ -162,3 +162,8 @@ La suite Python informa 61 advertencias de deprecación provenientes de Google G
 MongoMock bajo Python 3.14; no son fallos de pruebas. El TestClient ASGI se ejecutó fuera del
 sandbox porque dentro del aislamiento quedaba bloqueado. La comprobación visual no hace
 peticiones a proveedores reales ni utiliza datos privados.
+# Diagnóstico de reproducción
+
+Consultar el [reporte de recuperación del audio de Kanon](SPEECH-RECOVERY.md) para los
+reintentos acotados, registros seguros y verificación del fallo `503` de reproducción.
+

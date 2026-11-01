@@ -5,6 +5,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.proposal_contract import normalize_proposal_ast
 
 Provider = Literal['ollama', 'vertex']
+ChatScope = Literal['group', 'personal']
+ChatChannel = Literal['chat', 'call']
 
 
 class Contract(BaseModel):
@@ -20,8 +22,8 @@ class Actor(Contract):
 
 
 class SpeechRequest(Contract):
-    """Selecciona una voz permitida; el texto se obtiene del mensaje persistido."""
-    voice: Literal['sofia', 'marcelo']
+    """Fija la identidad vocal de Kanon; el texto se obtiene del mensaje persistido."""
+    voice: Literal['marcelo'] = 'marcelo'
 
 
 class Attachment(Contract):
@@ -54,7 +56,11 @@ class Submission(Contract):
     sender: Actor
     content: str = Field(default='', max_length=12000)
     provider: Provider = 'ollama'
+    language: Literal['es', 'en'] = 'es'
     askAssistant: bool = True
+    scope: ChatScope = 'group'
+    channel: ChatChannel = 'chat'
+    enforceMention: bool = False
     attachment: Attachment | None = None
     diagram: dict = Field(default_factory=dict)
     diagramRevision: str
@@ -68,6 +74,48 @@ class Submission(Contract):
         if len(json.dumps(self.diagram)) > 300000:
             raise ValueError('Diagram context is too large')
         return self
+
+
+class SuggestionFinding(Contract):
+    """Señal estructural detectada previamente sobre el diagrama para orientar a Kanon."""
+    code: str = Field(min_length=1, max_length=80)
+    message: str = Field(min_length=1, max_length=600)
+
+
+class SuggestionRequest(Contract):
+    """Solicitud efímera de sugerencia autónoma sin escribir en el historial del chat."""
+    sender: Actor
+    provider: Provider = 'ollama'
+    language: Literal['es', 'en'] = 'es'
+    hasMultipleCollaborators: bool = False
+    diagram: dict = Field(default_factory=dict)
+    findings: list[SuggestionFinding] = Field(default_factory=list, max_length=10)
+
+    @model_validator(mode='after')
+    def validate_diagram_budget(self):
+        """Impide evaluar snapshots excesivos en tareas proactivas de segundo plano."""
+        import json
+        if len(json.dumps(self.diagram)) > 300000:
+            raise ValueError('Diagram context is too large')
+        return self
+
+
+class SuggestionReply(Contract):
+    """Consejo breve generado por Kanon para mostrar junto al icono del manual."""
+    shouldSuggest: bool = True
+    title: str = Field(default='', max_length=140)
+    summary: str = Field(default='', max_length=600)
+    starterPrompt: str = Field(default='', max_length=600)
+
+
+class SuggestionAccept(Contract):
+    """Siembra idempotente de una sugerencia aceptada dentro del chat personal o grupal del usuario."""
+    clientSuggestionId: str = Field(min_length=8, max_length=80)
+    sender: Actor
+    title: str = Field(min_length=1, max_length=140)
+    summary: str = Field(min_length=1, max_length=4000)
+    language: str | None = Field(default=None, max_length=10)
+    scope: ChatScope = 'personal'
 
 
 class ModelReply(Contract):
@@ -108,3 +156,9 @@ class ModelReply(Contract):
                 if not isinstance(connection, dict) or connection.get('sourceNodeId') not in ids or connection.get('targetNodeId') not in ids:
                     raise ValueError('Proposal contains a dangling connection')
         return self
+
+
+class MultimodalReply(Contract):
+    """Transcripción o descripción y respuesta producidas juntas a partir del adjunto original."""
+    description: str = Field(min_length=1, max_length=16000)
+    reply: ModelReply

@@ -45,8 +45,10 @@ Las pruebas usan MongoMock y proveedores sustituidos. Verificar MongoDB y provee
 por separado cuando el cambio lo requiera. No fijar una cantidad histórica de pruebas.
 Mantener código en inglés, docstrings y guías en español, y métodos documentados.
 
-El chat admite texto, imágenes, clips y respuestas habladas opcionales con Edge TTS. Las
-llamadas en tiempo real y WebRTC siguen pendientes. Consultar el [modo voz](../docs/voice-mode/README.md).
+El asistente se presenta con la identidad **Kanon** y opera sobre salas grupales y privadas
+(`scope: group | personal`). Admite texto, imágenes, clips de voz transcritos, transcripción de
+intervenciones de llamada grupal con palabra de activación «Kanon», sugerencias autónomas y
+síntesis selectiva con Edge TTS. Consultar el [modo voz](../docs/voice-mode/README.md).
 
 Consultar la [skill de IA](../.agents/skills/sw1-ai-service-architect/SKILL.md), el
 [README operativo](../README.md) y las guías de
@@ -55,3 +57,9 @@ Consultar la [skill de IA](../.agents/skills/sw1-ai-service-architect/SKILL.md),
 
 La [memoria persistente de conversación](../docs/conversation-memory/README.md) combina
 mensajes recientes, acuerdos resumidos y recuperación léxica de mensajes antiguos.
+
+La entrega inmediata del chat, la voz fija de Kanon y los subtítulos alineados se describen en
+[Kanon: sincronización y reporte](../docs/kanon-realtime/README.md).
+
+La llamada usa [Gemini Live](../docs/gemini-live/README.md) con audio nativo; los clips e imágenes
+usan Gemini multimodal y mantienen el flujo de propuestas revisadas del chat.
