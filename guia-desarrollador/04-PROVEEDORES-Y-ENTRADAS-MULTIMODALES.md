@@ -10,15 +10,21 @@ u Ollama por su cuenta.
 
 | Selección | Adaptador | Uso |
 | --- | --- | --- |
-| `ollama` | HTTP local `/api/chat` | Texto y modelado con `qwen2.5-coder:14b`. |
+| `ollama` | HTTP local `/api/chat` | Texto, imágenes y modelado con `qwen3.8:latest`. |
 | `vertex` | Google Gen AI SDK | Generación cloud con `gemini-2.5-flash` por defecto. |
-| Medios | Google Gen AI SDK | Interpretación del adjunto original, transcripción/descripción y respuesta con Gemini. |
+| Audio para Qwen | Google Gen AI SDK → Ollama | Transcripción literal con Gemini; respuesta textual con Qwen. |
 | Llamada | Google Gen AI Live | Audio nativo bidireccional con transcripciones incrementales. |
 
 El catálogo comprueba modelos de Ollama mediante `/api/tags` con espera acotada. La disponibilidad
 cloud refleja configuración de credencial/proyecto; no constituye una prueba real de autorización,
 cuota o respuesta. Consultar el catálogo no debe ejecutar una inferencia ni descargar Qwen.
 No hay cambio silencioso a otro proveedor cuando falla el elegido.
+
+Las peticiones Ollama envían `think: false` explícitamente para texto, imágenes, memoria y
+sugerencias. El servidor inspeccionado declara razonamiento `medium` por defecto, lo que
+puede prolongar una consulta más allá del timeout de 90 segundos cuando `stream: false`.
+Se conserva el esquema JSON y la validación de respuestas; no se recorta el diagrama ni
+se aumenta el timeout. Ver [diagnóstico de latencia](../docs/qwen-vision/TIMEOUT-DIAGNOSIS.md).
 
 ## Autenticación Google
 
@@ -45,30 +51,36 @@ El adjunto se guarda de forma privada y NestJS autoriza su posterior descarga.
 
 ```mermaid
 flowchart TD
-  Media[Imagen o clip original] --> Validate[Validar y guardar solicitud]
-  Validate --> Known{Invocación explícita o chat Personal}
-  Known -->|Sí| Gemini[Gemini: medio original + texto + contexto]
-  Gemini --> Result[Una respuesta JSON: descripción/transcripción y respuesta]
-  Known -->|No| Describe[Gemini: descripción/transcripción para detectar la invocación]
-  Describe --> Mention{Audio menciona Kanon}
-  Mention -->|Sí| Gemini
-  Mention -->|No| History[Guardar intervención sin respuesta del asistente]
+  Media[Adjunto validado y guardado] --> Selected{Proveedor seleccionado}
+  Selected -->|Ollama: imagen| Vision[Qwen: images Base64 + texto y contexto]
+  Selected -->|Ollama: audio| STT[Gemini: transcripción literal]
+  STT --> Mention{Personal o invocación de Kanon}
+  Mention -->|Sí| Qwen[Qwen: transcripción + texto y contexto]
+  Mention -->|No| History[Guardar intervención sin respuesta]
+  Selected -->|Gemini| Cloud[Gemini: medio original + texto y contexto]
 ```
 
-Los adjuntos usan Gemini incluso si el selector está en Qwen; se informa en la interfaz y el
-servidor impone la misma regla. El proveedor efectivo del mensaje es `vertex`; el payload
-original conserva la selección para verificar idempotencia. Las consultas de solo texto
-continúan usando el proveedor seleccionado.
+El selector se respeta tanto en Angular como en FastAPI. Una imagen para Qwen se envía en
+`messages[].images` como Base64 puro, junto al contexto autorizado. Con invocación se valida
+`MultimodalReply` (descripción y respuesta); sin invocación grupal solo se describe para el historial.
+No se llama a Google para interpretar una imagen seleccionada para Ollama.
 
-En Personal o con `@Kanon` escrito junto al clip, `generate_multimodal` envía los bytes originales,
-el texto adjunto y el contexto autorizado en **una inferencia de contenido**. `MultimodalReply`
-valida `description` y `reply`. No hay transcripción previa para averiguar si se invocó a Kanon.
-La memoria histórica puede requerir su propia actualización por bloques, como en cualquier turno.
+Un clip seleccionado para Qwen **siempre** se transcribe primero con Gemini, incluso en Personal
+o si hay `@Kanon` escrito: Qwen consume la transcripción, no el audio. La detección de la mención
+hablada reutiliza ese mismo resultado. El contexto incluye texto adjunto y transcripción; la
+respuesta se valida como `ModelReply`. Un fallo de transcripción detiene el turno sin cambiar
+proveedor ni enviar audio a Ollama. El adjunto original permanece disponible para reproducción.
 
-En Grupal, un clip sin mención escrita todavía necesita transcripción para decidir si contiene
-«Kanon». Si lo invoca, la respuesta también usa el audio original, sin reducirlo a la transcripción.
-Una imagen sin invocación en Grupal se describe para el historial pero no solicita respuesta.
-No hay fallback de medios hacia Qwen. Los límites de MIME, tamaño y duración del frontend permanecen.
+Con Gemini seleccionado se conserva la optimización existente: si la invocación ya es conocida,
+una inferencia recibe el medio original y devuelve transcripción/descripción y respuesta. En
+audio grupal sin mención escrita se transcribe primero para detectar Kanon y, si corresponde,
+se responde usando el audio original. Una imagen grupal sin mención solo se describe.
+
+La memoria usa el proveedor elegido. El mensaje humano conserva `provider` y `mediaProvider`
+identifica al intérprete del adjunto: `ollama` para imágenes locales y `vertex` para transcripción.
+El catálogo anuncia `inputs: [text, image]` y `audioVia: vertex` para Qwen; `mediaProvider: vertex`
+en la raíz del catálogo se conserva por compatibilidad y designa al transcriptor. No hay fallback
+silencioso a Google cuando falla Qwen. Los contratos de envío y los límites de medios se conservan.
 
 ## Transcripción literal con vocabulario
 

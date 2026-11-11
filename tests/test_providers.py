@@ -153,3 +153,104 @@ def test_memory_summary_uses_selected_provider_and_bounded_schema(monkeypatch, p
         assert set(schema['properties']) == {'items'}
     finally:
         providers.close()
+
+
+@pytest.mark.parametrize('operation', ['reply', 'description'])
+def test_ollama_image_protocol_and_no_cloud_fallback(operation):
+    """Envía Base64 puro en images con esquema cuando corresponde, sin llamadas Google."""
+    from app.models import Attachment
+    providers = ModelProviders(Settings(_env_file=None))
+    requests = []
+    payload = json.dumps({'description': 'Un rectángulo', 'reply': {'content': 'OK'}})
+
+    def respond(request):
+        """Captura el contrato HTTP real sin enviar medios fuera del proceso de pruebas."""
+        requests.append(request)
+        return httpx.Response(200, json={'message': {'content': payload if operation == 'reply' else 'Un rectángulo'},
+                                        'prompt_eval_count': 12, 'eval_count': 4})
+
+    headers = dict(providers.http.headers)
+    providers.http.close()
+    providers.http = httpx.Client(transport=httpx.MockTransport(respond), headers=headers)
+    providers.cloud = Mock(side_effect=AssertionError('Unexpected cloud call'))
+    attachment = Attachment(kind='image', mimeType='image/png', data='YWJj')
+    try:
+        if operation == 'reply':
+            reply, metadata = providers.generate_multimodal('Describe image', attachment, provider='ollama')
+            assert reply.reply.content == 'OK'
+            assert metadata == {'provider': 'ollama', 'model': 'qwen3.8:latest', 'inputTokens': 12, 'outputTokens': 4}
+        else:
+            assert providers.describe_attachment(attachment, provider='ollama') == 'Un rectángulo'
+        assert len(requests) == 1
+        request = requests[0]
+        body = json.loads(request.content)
+        assert request.url.path == '/api/chat'
+        assert request.headers['ngrok-skip-browser-warning'] == 'true'
+        assert body['model'] == 'qwen3.8:latest'
+        assert body['stream'] is False
+        assert body['messages'][-1]['images'] == ['YWJj']
+        assert ('format' in body) == (operation == 'reply')
+        providers.cloud.assert_not_called()
+    finally:
+        providers.close()
+
+
+def test_ollama_rejects_raw_audio_and_reports_image_capability():
+    """Evita enviar audio binario y anuncia imagen nativa y transcripción externa en catálogo."""
+    from app.models import Attachment
+    providers = ModelProviders(Settings(_env_file=None))
+    providers.http.close()
+    requests = []
+
+    def respond(request):
+        """Devuelve el catálogo sin ejecutar inferencia ni cargar el modelo."""
+        requests.append(request)
+        return httpx.Response(200, json={'models': [{'name': 'qwen3.8:latest'}]})
+
+    providers.http = httpx.Client(transport=httpx.MockTransport(respond))
+    try:
+        with pytest.raises(ValueError, match='requires transcription'):
+            providers.generate_multimodal('audio', Attachment(kind='audio', mimeType='audio/webm', data='YWJj'), provider='ollama')
+        assert not requests
+        catalog = providers.catalog()['models'][0]
+        assert catalog['available'] is True
+        assert catalog['inputs'] == ['text', 'image']
+        assert catalog['audioVia'] == 'vertex'
+        assert requests[0].url.path == '/api/tags'
+    finally:
+        providers.close()
+
+
+@pytest.mark.parametrize('operation', ['generate', 'generate_multimodal', 'summarize', 'suggest'])
+def test_ollama_disables_optional_thinking_for_structured_requests(operation):
+    """Todas las inferencias Ollama omiten razonamiento extra sin relajar el esquema de salida."""
+    from app.models import Attachment
+    requests = []
+    payloads = {
+        'generate': {'content': 'OK'},
+        'generate_multimodal': {'description': 'An image', 'reply': {'content': 'OK'}},
+        'summarize': {'items': []},
+        'suggest': {'shouldSuggest': False},
+    }
+
+    def respond(request):
+        """Conserva el cuerpo saliente y devuelve un JSON válido para cada contrato."""
+        requests.append(request)
+        return httpx.Response(200, json={'message': {'content': json.dumps(payloads[operation])}})
+
+    providers = ModelProviders(Settings(_env_file=None))
+    providers.http.close()
+    providers.http = httpx.Client(transport=httpx.MockTransport(respond))
+    try:
+        if operation == 'generate_multimodal':
+            providers.generate_multimodal('Context', Attachment(kind='image', mimeType='image/png', data='YWJj'), provider='ollama')
+        else:
+            getattr(providers, operation)('ollama', 'Context')
+        assert len(requests) == 1
+        body = json.loads(requests[0].content)
+        assert body['think'] is False
+        assert body['stream'] is False
+        assert isinstance(body['format'], dict)
+        assert body['model'] == 'qwen3.8:latest'
+    finally:
+        providers.close()

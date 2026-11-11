@@ -1,6 +1,6 @@
 # Microservicio de conversación e IA
 
-FastAPI concentra la conversación grupal, contexto del mentor/modelador, Ollama **Qwen2.5-Coder 14B**,
+FastAPI concentra la conversación grupal, contexto del mentor/modelador, Ollama **Qwen3.8**,
 Google Vertex/Gemini y procesamiento de imágenes/clips de voz. MongoDB conserva el historial.
 NestJS conserva JWT, permisos, proyectos y aplicación del AST en PostgreSQL.
 
@@ -14,11 +14,10 @@ uv sync
 uv run uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
-No se instala ni descarga Qwen durante el arranque. Para habilitar el proveedor local:
-
-```bash
-ollama pull qwen2.5-coder:14b
-```
+No se instala ni descarga Qwen durante el arranque. El servidor Ollama configurado debe tener
+un modelo visual disponible con el identificador exacto `qwen3.8:latest` (incluidos modelos o
+aliases preparados en ese servidor). Verificarlo con `ollama list` en la máquina que lo ejecuta.
+El identificador es configurable; no se presupone su disponibilidad en el registro público.
 
 El modelo necesita recursos suficientes; medir latencia y memoria en la máquina de despliegue.
 La API no usa otro modelo ni envía texto a cloud cuando falla el proveedor seleccionado.
@@ -43,9 +42,20 @@ enviar la región, ya que produciría una ruta con `projects/None`. Sin proyecto
 usa el modo Express sin forzar región. Las claves de Gemini API siguen usando su cliente propio;
 ADC continúa disponible cuando no se configura API key.
 
-La configuración local selecciona **Vertex** como proveedor inicial con `gemini-2.5-flash`;
-Qwen sigue disponible para texto. En Personal Kanon responde siempre; en Grupal se invoca
-con `@Kanon` escrito o «Kanon» en un clip de voz. Los adjuntos se procesan con Gemini.
+`CHAT_DEFAULT_PROVIDER` determina la selección inicial. Qwen admite texto e imágenes;
+los clips se transcriben con Gemini y Qwen responde a esa transcripción. Si se selecciona
+Gemini, se conserva el envío del medio original. En Personal Kanon responde siempre;
+en Grupal se invoca con `@Kanon` escrito o «Kanon» en un clip de voz.
+
+Para un Ollama remoto, configurar en **ia/.env** `OLLAMA_BASE_URL` con la URL base HTTPS,
+sin `/api/chat`, y `CHAT_OLLAMA_MODEL=qwen3.8:latest`. El adaptador añade
+`ngrok-skip-browser-warning: true` a sus consultas de catálogo, generación, memoria y sugerencias.
+Las imágenes se envían como Base64 puro en `messages[].images`, sin prefijo data URI.
+El audio sigue viajando como adjunto Base64 del navegador a FastAPI y a Google para transcribirlo;
+**Ollama recibe únicamente su transcripción y el contexto**, no el binario del clip.
+El uso de Ollama remoto implica enviar texto e imágenes a ese servidor, no procesarlos en el navegador.
+
+Ver [migración, pruebas y límites](docs/qwen-vision/README.md).
 
 | Variable | Valor por defecto / propósito |
 | --- | --- |
@@ -53,14 +63,14 @@ con `@Kanon` escrito o «Kanon» en un clip de voz. Los adjuntos se procesan con
 | `MONGODB_URI` | Conexión privada definida en `ia/.env`, con autenticación en `admin`. |
 | `MONGODB_DATABASE` | `uml_studio_db`; debe corresponder a la base seleccionada en la URI. |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` |
-| `CHAT_OLLAMA_MODEL` | `qwen2.5-coder:14b`; el antiguo `OLLAMA_MODEL` no reemplaza este valor. |
+| `CHAT_OLLAMA_MODEL` | `qwen3.8:latest`; el antiguo `OLLAMA_MODEL` no reemplaza este valor. |
 | `CHAT_DEFAULT_PROVIDER` | `ollama`; si no existe, se acepta `AI_PROVIDER` del entorno de FastAPI. Valores: `ollama`, `vertex`. |
 | `GEMINI_MODEL` | `gemini-2.5-flash` si no está definido en FastAPI. |
 | `GEMINI_API_KEY` | Credencial privada de Vertex/Gemini; no se copia al backend ni al frontend. |
 | `GCP_PROJECT_ID` | ID o número del proyecto autorizado; obligatorio para la ruta regional de Vertex. |
 | `GCP_LOCATION` | `us-central1` |
-| `CHAT_MEDIA_PROVIDER` | `vertex`: transcripción de clips y descripción de imágenes. |
-| `CHAT_TIMEOUT_SECONDS` | 90, configurable de 5 a 120 por solicitud al proveedor. |
+| `CHAT_MEDIA_PROVIDER` | `vertex`: transcripción de clips; las imágenes usan el proveedor seleccionado. |
+| `CHAT_TIMEOUT_SECONDS` | 300, configurable de 5 a 600 por solicitud al proveedor. |
 | `CHAT_CONTEXT_CHARS` | 48000; rechaza un snapshot que por sí solo no quepa. |
 | `CHAT_RECENT_MESSAGES` | 12; ventana reciente entre 4 y 40 mensajes. |
 | `CHAT_MEMORY_BATCH_MESSAGES` | 12; bloques resumidos entre 4 y 12 mensajes. |

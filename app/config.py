@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     mongodb_uri: str = 'mongodb://127.0.0.1:27017/uml_studio_db'
     mongodb_database: str = 'uml_studio_db'
     ollama_base_url: str = 'http://127.0.0.1:11434'
-    chat_ollama_model: str = 'qwen2.5-coder:14b'
+    chat_ollama_model: str = 'qwen3.8:latest'
     gemini_model: str = 'gemini-2.5-flash'
     gemini_live_model: str = 'gemini-3.8-live'
     gemini_live_voice: str = 'Charon'
@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     gcp_location: str = 'us-central1'
     chat_default_provider: Literal['ollama', 'vertex'] = Field(default='ollama', validation_alias=AliasChoices('CHAT_DEFAULT_PROVIDER', 'AI_PROVIDER'))
     chat_media_provider: Literal['vertex'] = 'vertex'
-    chat_timeout_seconds: int = Field(default=90, ge=5, le=120)
+    chat_timeout_seconds: int = Field(default=300, ge=5, le=600)
     chat_context_chars: int = Field(default=48000, ge=4000, le=100000)
     chat_recent_messages: int = Field(default=12, ge=4, le=40)
     chat_memory_batch_messages: int = Field(default=12, ge=4, le=12)

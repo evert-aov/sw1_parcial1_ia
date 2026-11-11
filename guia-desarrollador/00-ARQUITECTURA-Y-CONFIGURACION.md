@@ -9,7 +9,7 @@ flowchart LR
   Service --> Repo[ConversationRepository]
   Repo --> Mongo[(MongoDB)]
   Service --> Models[ModelProviders]
-  Models --> Local[Ollama / Qwen 14B]
+  Models --> Local[Ollama / Qwen3.8]
   Models --> Cloud[Vertex / Gemini]
 ```
 
@@ -28,14 +28,14 @@ del directorio de ejecución. Las variables del proceso prevalecen. No lee `back
 | `MONGODB_URI` | `mongodb://127.0.0.1:27017/uml_studio_db`; configurar autenticación en el entorno real. |
 | `MONGODB_DATABASE` | `uml_studio_db`. |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434`. |
-| `CHAT_OLLAMA_MODEL` | `qwen2.5-coder:14b`. |
+| `CHAT_OLLAMA_MODEL` | `qwen3.8:latest`. |
 | `CHAT_DEFAULT_PROVIDER` | `ollama`; valores admitidos: `ollama`, `vertex`. |
 | `AI_PROVIDER` | Alias de compatibilidad usado si falta `CHAT_DEFAULT_PROVIDER`. |
 | `GEMINI_MODEL` | `gemini-2.5-flash`. |
 | `GEMINI_API_KEY` | Credencial Google, solo en FastAPI. |
 | `GCP_PROJECT_ID`, `GCP_LOCATION` | Proyecto autorizado y ubicación; región predeterminada `us-central1`. |
-| `CHAT_MEDIA_PROVIDER` | `vertex`, para descripción/transcripción. |
-| `CHAT_TIMEOUT_SECONDS` | 90 por solicitud al proveedor, entre 5 y 120. |
+| `CHAT_MEDIA_PROVIDER` | `vertex`, para transcripción de audio. Las imágenes usan el proveedor seleccionado. |
+| `CHAT_TIMEOUT_SECONDS` | 300 por solicitud al proveedor, entre 5 y 600. |
 | `CHAT_CONTEXT_CHARS` | 48000 caracteres, entre 4000 y 100000. |
 | `CHAT_RECENT_MESSAGES` | 12; ventana reciente entre 4 y 40 mensajes. |
 | `CHAT_MEMORY_BATCH_MESSAGES` | 12; bloques resumidos entre 4 y 12 mensajes. |
@@ -61,4 +61,5 @@ de una instalación existente. No iniciar otra instancia sobre un puerto ya ocup
 la URI de una base real para hacer coincidir un ejemplo de esta guía.
 
 El arranque no descarga ni carga Qwen por sí mismo. Para usarlo, preparar Ollama e instalar
-el modelo explícitamente con `ollama pull qwen2.5-coder:14b`.
+el modelo visual bajo el identificador configurado; comprobarlo con `ollama list` en ese servidor.
+`OLLAMA_BASE_URL` admite un servidor remoto HTTPS, sin el sufijo `/api/chat`.

@@ -30,7 +30,7 @@ Al cambiar una frontera ejecutar también las suites backend/frontend correspond
 | NestJS devuelve 503 | Proceso FastAPI, `AI_SERVICE_URL`, token compartido y timeout del puente. |
 | `/health` responde pero falla IA | Modelo instalado, credencial, proyecto, región y límites del proveedor. |
 | Vertex intenta una ruta con `projects/None` | Configurar proyecto en el cliente regional y reiniciar. |
-| Estado `generation_failed` | Revisar configuración/entrada; reintentar el turno original como autor. |
+| Estado `generation_failed` | Buscar `Conversation turn failed` por `request_id`: etapa, proveedor, tipo de excepción y duración; reintentar el turno original como autor tras corregir la causa. |
 | Propuesta rechazada por NestJS | Revisar `error.issues` y contrato canónico; no asumir que una respuesta conversacional confirma aplicación. |
 | Catálogo/historial consultados sin pausa | Revisar temporizadores y efectos del cliente Angular antes de atribuir consumo a Qwen. |
 
@@ -67,3 +67,16 @@ Los latidos SSE no generan nuevas peticiones GET. Reiniciar FastAPI y NestJS tra
 versión; no se requieren variables nuevas. Un proxy debe permitir respuestas streaming sin
 buffering y conservar la conexión entre latidos. Ver el
 [reporte de notificaciones](../docs/chat-notifications/README.md).
+
+## Diagnóstico seguro de turnos fallidos
+
+`ConversationService.process` registra `request_id`, `provider`, `stage`, `error_type`
+y `elapsed_ms` cuando un turno falla. Las etapas son `request`, `attachment_description`,
+`context` y `generation`. La etapa de generación incluye la validación del resultado del modelo.
+El registro no incluye el texto de la excepción, traceback, prompts, medios, URLs ni credenciales.
+El contrato público mantiene `generation_failed`; los fallos históricos previos a este registro
+no permiten reconstruir retrospectivamente su causa exacta.
+
+Un `ReadTimeout` indica espera de lectura agotada. Con Ollama sin streaming, una inferencia
+puede superar ese plazo antes de entregar el JSON final. Ver el
+[caso reproducido y corrección](../docs/qwen-vision/TIMEOUT-DIAGNOSIS.md).

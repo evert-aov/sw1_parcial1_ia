@@ -71,7 +71,7 @@ class ConversationService:
                        'source': attachment.kind if attachment else 'text',
                        'scope': submission.scope, 'channel': submission.channel,
                        'status': 'queued' if effective_ask or attachment else 'completed',
-                       'askAssistant': effective_ask, 'provider': 'vertex' if attachment else submission.provider,
+                       'askAssistant': effective_ask, 'provider': submission.provider,
                        'attachment': {'mimeType': attachment.mimeType, 'name': attachment.name} if attachment else None}
             room['nextSequence'] += 1
             room['messages'].append(message)
@@ -97,7 +97,8 @@ class ConversationService:
             message = active or next((m for m in room['messages'] if m['status'] == 'queued'), None)
             if not message:
                 return None
-            message.update(status='processing', leaseToken=str(uuid4()), leaseUntil=time.time() + 300)
+            lease_seconds = max(300, int(getattr(self.settings, 'chat_timeout_seconds', 180)) + 60)
+            message.update(status='processing', leaseToken=str(uuid4()), leaseUntil=time.time() + lease_seconds)
             return dict(message)
         return self.repository.mutate(room_id, reserve)
 
@@ -111,16 +112,23 @@ class ConversationService:
         description = ''
         failure = None
         invoke_ai = bool(message.get('askAssistant'))
+        started_at = time.monotonic()
+        stage = 'request'
+        provider = message.get('provider', 'unknown')
         try:
             request = self.repository.request(message['id'])
             attachment = Attachment.model_validate(request['attachment']) if request.get('attachment') else None
+            provider = request['provider']
+            transcribed_audio = attachment is not None and attachment.kind == 'audio' and provider == 'ollama'
             known_invocation = request.get('scope') == 'personal' or (
                 mentions_kanon_tag(request.get('content', '')) if request.get('enforceMention')
                 else bool(request.get('askAssistant')))
-            if attachment and not known_invocation:
+            if attachment and (not known_invocation or transcribed_audio):
+                stage = 'attachment_description'
                 description = self.providers.describe_attachment(
                     attachment,
                     diagram=request.get('diagram'), language=request.get('language'),
+                    provider=provider,
                 )
                 if not description:
                     raise ValueError('Empty attachment transcription')
@@ -135,6 +143,7 @@ class ConversationService:
                     invoke_ai = mentions_kanon_tag(request.get('content', ''))
             prompt_message = {**message, 'content': request['content'] + ('\n' + description if description else '')}
             if invoke_ai:
+                stage = 'context'
                 snapshot = self.repository.read(room_id)
                 # Validar primero la parte obligatoria, evitando inferencias de resumen innecesarias.
                 build_context([], prompt_message, request['diagram'], self.settings.chat_context_chars)
@@ -142,21 +151,27 @@ class ConversationService:
                 try:
                     if self.memory is not None:
                         memory = self.memory.prepare(room_id, eligible_messages(snapshot['messages'], prompt_message),
-                                                     'vertex' if attachment else message['provider'])
+                                                     provider)
                 except Exception:
                     # El historial sigue siendo utilizable si la caché derivada no está disponible.
                     logging.getLogger(__name__).warning('Conversation memory unavailable; using history retrieval')
                 context = build_context(snapshot['messages'], prompt_message,
                                         request['diagram'], self.settings.chat_context_chars, memory,
                                         self.settings.chat_recent_messages, self.settings.chat_retrieval_messages)
-                if attachment:
-                    result, metadata = self.providers.generate_multimodal(context, attachment)
+                stage = 'generation'
+                if attachment and not transcribed_audio:
+                    result, metadata = self.providers.generate_multimodal(context, attachment, provider=provider)
                     description, reply = description or result.description, result.reply
                 else:
-                    reply, metadata = self.providers.generate(message['provider'], context)
+                    reply, metadata = self.providers.generate(provider, context)
                 metadata.update(contextRevision=snapshot['revision'], diagramRevision=request['diagramRevision'])
-        except Exception:
+        except Exception as exc:
             # Los errores del proveedor pueden contener URLs o claves; nunca publicarlos al cliente.
+            logging.getLogger(__name__).error(
+                'Conversation turn failed: request_id=%s provider=%s stage=%s error_type=%s elapsed_ms=%d',
+                message['id'], provider, stage, type(exc).__name__,
+                int((time.monotonic() - started_at) * 1000),
+            )
             failure = 'generation_failed'
         def finish(room):
             """Publica solo si el worker conserva su lease; descarta resultados duplicados o tardíos."""
@@ -168,7 +183,7 @@ class ConversationService:
             current.pop('leaseUntil', None)
             if description:
                 current['transcription'] = description
-                current['mediaProvider'] = 'vertex'
+                current['mediaProvider'] = 'vertex' if attachment.kind == 'audio' else provider
                 current['content'] = request['content'] + ('\n' if request['content'] else '') + description
             if failure:
                 current['errorCode'] = failure

@@ -29,12 +29,12 @@ class Providers:
         self.contexts = json.loads(context)
         return ModelReply(content='Hello', proposedAst={'nodes': [], 'connections': []}), {'model': 'test', 'provider': provider}
 
-    def generate_multimodal(self, context, attachment):
+    def generate_multimodal(self, context, attachment, *, provider='vertex'):
         """Resuelve medios sin transcripción previa y reutiliza el doble de respuesta estructurada."""
-        reply, metadata = self.generate('vertex', context)
+        reply, metadata = self.generate(provider, context)
         return MultimodalReply(description='Recorded question', reply=reply), metadata
 
-    def describe_attachment(self, attachment, *, diagram=None, language=None):
+    def describe_attachment(self, attachment, *, diagram=None, language=None, provider='vertex'):
         """Simula una transcripción sin pedir acceso a audio real."""
         return 'Recorded question'
 
@@ -268,7 +268,7 @@ def test_audio_transcription_receives_snapshot_and_canon_still_invokes_kanon(ser
     """Propaga vocabulario al transcriptor y conserva la frase obtenida sin correcciones forzadas."""
     captured = {}
 
-    def transcribe(attachment, *, diagram=None, language=None):
+    def transcribe(attachment, *, diagram=None, language=None, provider='vertex'):
         """Registra el contexto de la solicitud y simula la variante fonética del nombre."""
         captured.update(diagram=diagram, language=language)
         return 'Canon, explícame la relación entre pedido y detalle pedido.'
@@ -288,12 +288,12 @@ def test_audio_transcription_receives_snapshot_and_canon_still_invokes_kanon(ser
 
 @pytest.mark.parametrize('kind,scope,content', [('audio', 'group', '@Kanon'), ('audio', 'personal', ''), ('image', 'group', '@Kanon explica')])
 def test_explicit_multimodal_turn_uses_gemini_once_without_description_pass(service, kind, scope, content):
-    """La invocación conocida envía el adjunto original a Gemini aunque el selector sea Qwen."""
+    """La invocación conocida con Gemini envía el adjunto original sin transcripción previa."""
     from unittest.mock import Mock
     service.providers.describe_attachment = Mock(side_effect=AssertionError('Unexpected transcription call'))
     generate = Mock(wraps=service.providers.generate_multimodal)
     service.providers.generate_multimodal = generate
-    request = submission(content=content, scope=scope, enforceMention=True, provider='ollama',
+    request = submission(content=content, scope=scope, enforceMention=True, provider='vertex',
                          attachment={'kind': kind, 'mimeType': 'audio/webm' if kind == 'audio' else 'image/png', 'data': 'YWJj'})
     original = service.submit(ROOM, request)
     assert original['provider'] == 'vertex'
@@ -305,5 +305,109 @@ def test_explicit_multimodal_turn_uses_gemini_once_without_description_pass(serv
     service.providers.describe_attachment.assert_not_called()
     generate.assert_called_once()
     assert generate.call_args.args[1].data == 'YWJj'
-    assert service.repository.request(original['id'])['provider'] == 'ollama'
+    assert service.repository.request(original['id'])['provider'] == 'vertex'
     assert service.submit(ROOM, request)['id'] == original['id']
+
+
+@pytest.mark.parametrize('scope,content', [('personal', ''), ('group', '@Kanon explica'), ('group', '')])
+def test_qwen_audio_uses_transcript_and_selected_provider(service, scope, content):
+    """Qwen recibe texto transcrito, nunca el clip, incluso cuando ya existe mención escrita."""
+    from unittest.mock import Mock
+    transcript = 'Kanon explícame Pedido y DetallePedido.'
+    service.providers.describe_attachment = Mock(return_value=transcript)
+    service.providers.generate_multimodal = Mock(side_effect=AssertionError('Audio sent to model'))
+    generate = Mock(wraps=service.providers.generate)
+    service.providers.generate = generate
+    service.memory = Mock()
+    service.memory.prepare.return_value = None
+    request = submission(content=content, scope=scope, enforceMention=True, provider='ollama',
+                         attachment={'kind': 'audio', 'mimeType': 'audio/webm', 'data': 'YWJj'})
+    original = service.submit(ROOM, request)
+    service.process(ROOM)
+    messages = service.history(ROOM)['messages']
+    assert original['provider'] == messages[1]['provider'] == 'ollama'
+    assert messages[0]['transcription'] == transcript
+    assert messages[0]['mediaProvider'] == 'vertex'
+    service.providers.describe_attachment.assert_called_once()
+    service.providers.generate_multimodal.assert_not_called()
+    generate.assert_called_once()
+    assert generate.call_args.args[0] == 'ollama'
+    assert transcript in generate.call_args.args[1]
+    assert 'YWJj' not in generate.call_args.args[1]
+    assert service.memory.prepare.call_args.args[2] == 'ollama'
+    assert service.submit(ROOM, request)['id'] == original['id']
+
+
+@pytest.mark.parametrize('invoked', [True, False])
+def test_qwen_image_stays_local_with_or_without_invocation(service, invoked):
+    """La imagen usa Ollama también para descripción grupal sin respuesta del asistente."""
+    from unittest.mock import Mock
+    describe = Mock(wraps=service.providers.describe_attachment)
+    generate = Mock(wraps=service.providers.generate_multimodal)
+    service.providers.describe_attachment = describe
+    service.providers.generate_multimodal = generate
+    service.submit(ROOM, submission(content='@Kanon explica' if invoked else 'Imagen del equipo',
+                                   enforceMention=True, provider='ollama',
+                                   attachment={'kind': 'image', 'mimeType': 'image/png', 'data': 'YWJj'}))
+    service.process(ROOM)
+    messages = service.history(ROOM)['messages']
+    assert messages[0]['status'] == 'completed'
+    assert messages[0]['mediaProvider'] == 'ollama'
+    if invoked:
+        describe.assert_not_called()
+        generate.assert_called_once()
+        assert generate.call_args.kwargs['provider'] == 'ollama'
+        assert generate.call_args.args[1].data == 'YWJj'
+        assert messages[1]['provider'] == 'ollama'
+    else:
+        describe.assert_called_once()
+        assert describe.call_args.kwargs['provider'] == 'ollama'
+        generate.assert_not_called()
+        assert len(messages) == 1
+
+
+def test_qwen_transcription_failure_preserves_message_without_generation(service):
+    """Un fallo de transcripción no envía audio a Qwen ni cambia silenciosamente de proveedor."""
+    from unittest.mock import Mock
+    service.providers.describe_attachment = Mock(side_effect=RuntimeError('private failure'))
+    service.providers.generate = Mock()
+    service.providers.generate_multimodal = Mock()
+    service.submit(ROOM, submission(scope='personal', provider='ollama',
+                                   attachment={'kind': 'audio', 'mimeType': 'audio/webm', 'data': 'YWJj'}))
+    service.process(ROOM)
+    messages = service.history(ROOM)['messages']
+    assert len(messages) == 1
+    assert messages[0]['status'] == 'failed'
+    assert messages[0]['errorCode'] == 'generation_failed'
+    service.providers.generate.assert_not_called()
+    service.providers.generate_multimodal.assert_not_called()
+
+
+@pytest.mark.parametrize('stage', ['generation', 'attachment_description'])
+def test_failure_logs_safe_diagnostics_without_private_exception(service, caplog, stage):
+    """Registra etapa y tipo de fallo sin divulgar URL, credenciales ni contenido privado."""
+    from unittest.mock import Mock
+    import httpx
+    secret = 'private-key-and-audio-payload'
+    failure = Mock(side_effect=httpx.ReadTimeout(secret))
+    changes = {'scope': 'personal', 'provider': 'ollama'}
+    if stage == 'generation':
+        service.providers.generate = failure
+    else:
+        service.providers.describe_attachment = failure
+        changes['attachment'] = {'kind': 'audio', 'mimeType': 'audio/webm', 'data': 'YWJj'}
+    message = service.submit(ROOM, submission(**changes))
+    with caplog.at_level('ERROR', logger='app.conversations'):
+        service.process(ROOM)
+    assert f"request_id={message['id']}" in caplog.text
+    assert f'stage={stage}' in caplog.text
+    assert 'provider=ollama' in caplog.text
+    assert 'error_type=ReadTimeout' in caplog.text
+    assert 'elapsed_ms=' in caplog.text
+    assert secret not in caplog.text
+    assert 'YWJj' not in caplog.text
+    assert 'Help with this diagram' not in caplog.text
+    saved = service.history(ROOM)['messages'][0]
+    assert saved['status'] == 'failed'
+    assert saved['errorCode'] == 'generation_failed'
+    assert secret not in json.dumps(saved)
